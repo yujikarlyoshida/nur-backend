@@ -2,7 +2,7 @@
 
 API for **Nur** (نور = "Light"), a Quranic wellbeing check-in app. It takes a user's emotional state and returns personalized Quran verse recommendations with context.
 
-Frontend: [nur-mobile](https://github.com/Tarambulog/nur-mobile)
+Frontend: [nur-mobile](https://github.com/yujikarlyoshida/nur-mobile)
 
 ## Stack
 

@@ -61,6 +61,7 @@ export interface CheckinRequest {
   text?: string;
   mood_selected?: EmotionState;
   language?: string;
+  location?: LocationContext;
 }
 
 export interface CheckinResponse {
@@ -68,6 +69,7 @@ export interface CheckinResponse {
   emotional_profile: EmotionalProfile;
   recommendations: VerseRecommendation[];
   crisis_resources?: CrisisResources;
+  activity_suggestions?: ActivitySuggestion[];
 }
 
 // ─── Verse ────────────────────────────────────────────────────────────────────
@@ -108,6 +110,46 @@ export interface CrisisHotline {
 export interface CrisisResources {
   message: string;
   hotlines: CrisisHotline[];
+}
+
+// ─── Real-World Activity Suggestions ──────────────────────────────────────────
+//
+// A second recommendation type alongside verses: instead of (or in addition
+// to) scripture, suggest a real-world action near the user, matched to their
+// emotional state and the time of day. Uses the same "curated taxonomy +
+// pluggable live data source" pattern as the verse RAG layer (see
+// activityProvider.service.ts) — a hand-built category catalog always works;
+// a real places API (Google Places, Yelp, etc.) augments it when configured.
+
+export type ActivityCategory =
+  | 'calm_nature' // parks, trails, waterfronts — for anxiety, overwhelm
+  | 'physical_release' // go-karting, climbing, boxing — for anger, restlessness
+  | 'social_gathering' // grilling spots, cafes, board game venues — for loneliness, gratitude
+  | 'quiet_reflection' // mosques, libraries, journaling spaces — for grief, confusion, guilt
+  | 'adventure' // hiking, kayaking, trampoline parks — for hope, seeking novelty
+  | 'creative_or_learning' // studios, bookstores, classes — for peace, curiosity
+  | 'service_or_community' // volunteering, community centers — for disconnection, guilt
+  | 'celebration'; // spas, lounges, dinner spots — for joy, gratitude
+
+export interface LocationContext {
+  latitude: number;
+  longitude: number;
+  /** IANA timezone (e.g. "America/Los_Angeles"); falls back to server time if omitted. */
+  timezone?: string;
+}
+
+export interface ActivitySuggestion {
+  id: string;
+  name: string;
+  category: ActivityCategory;
+  description: string;
+  /** Straight-line distance from the user's location, in km. */
+  distance_km?: number;
+  typical_hours?: string;
+  is_open_now?: boolean;
+  relevance_score: number;
+  /** Where this suggestion came from — lets the UI/analytics distinguish real data from the sample catalog. */
+  source: 'sample' | 'google_places';
 }
 
 // ─── Emotion Taxonomy Entry ───────────────────────────────────────────────────

@@ -3,13 +3,19 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { safeScrubPII } from '../utils/piiScrubber.js';
 import { classifyEmotion } from '../services/nlp.service.js';
-import { getRecommendations } from '../services/recommendation.service.js';
+import { getRecommendations, getActivityRecommendations } from '../services/recommendation.service.js';
 import type { CheckinRequest, CheckinResponse } from '../types/index.js';
 import { getAllEmotions } from '../utils/emotionTaxonomy.js';
 
 // ─── Zod Validation Schema ────────────────────────────────────────────────────
 
 const emotionValues = getAllEmotions() as [string, ...string[]];
+
+const locationSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  timezone: z.string().optional(),
+});
 
 const checkinBodySchema = z.object({
   input_type: z.enum(['text', 'voice_transcript', 'mood_select']),
@@ -22,6 +28,10 @@ const checkinBodySchema = z.object({
     .string()
     .regex(/^[a-z]{2}(-[A-Z]{2})?$/, 'language must be a BCP-47 tag (e.g. "en", "ar", "ur")')
     .optional(),
+  // Optional — only sent if the client has location permission. Powers
+  // real-world activity_suggestions alongside verse recommendations; the
+  // app works fully without it, same as everything else optional here.
+  location: locationSchema.optional(),
 });
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
@@ -48,6 +58,14 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
             text: { type: 'string', maxLength: 2000 },
             mood_selected: { type: 'string' },
             language: { type: 'string' },
+            location: {
+              type: 'object',
+              properties: {
+                latitude: { type: 'number' },
+                longitude: { type: 'number' },
+                timezone: { type: 'string' },
+              },
+            },
           },
         },
       },
@@ -63,7 +81,7 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const body = parseResult.data as CheckinRequest;
-      const { input_type, mood_selected, language } = body;
+      const { input_type, mood_selected, language, location } = body;
       let { text } = body;
 
       // ── 2. Validate business logic ───────────────────────────────────────
@@ -113,7 +131,20 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
         recommendations = [];
       }
 
-      // ── 6. Persist check-in to Supabase (best-effort, non-blocking) ──────
+      // ── 6. Generate real-world activity suggestions (only if the client
+      //       sent a location — this is purely additive, see
+      //       getActivityRecommendations for the graceful-fallback design) ──
+      let activity_suggestions: import('../types/index.js').ActivitySuggestion[] | undefined;
+      if (location) {
+        try {
+          activity_suggestions = await getActivityRecommendations(emotionalProfile, location);
+        } catch (err) {
+          app.log.warn({ err }, 'Activity suggestion generation failed');
+          // Omit the field rather than fail the whole check-in
+        }
+      }
+
+      // ── 7. Persist check-in to Supabase (best-effort, non-blocking) ──────
       const checkinId = randomUUID();
       persistCheckin(app, checkinId, body, emotionalProfile, recommendations).catch(
         (err: unknown) => {
@@ -121,12 +152,16 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
         },
       );
 
-      // ── 7. Build and return response ────────────────────────────────────
+      // ── 8. Build and return response ────────────────────────────────────
       const response: CheckinResponse = {
         checkin_id: checkinId,
         emotional_profile: emotionalProfile,
         recommendations,
       };
+
+      if (activity_suggestions && activity_suggestions.length > 0) {
+        response.activity_suggestions = activity_suggestions;
+      }
 
       if (crisis_resources) {
         response.crisis_resources = crisis_resources;

@@ -3,15 +3,20 @@ import type {
   VerseRecommendation,
   Verse,
   CrisisResources,
+  ActivityCategory,
+  ActivitySuggestion,
+  LocationContext,
 } from '../types/index.js';
 import { getVersesByKeys } from './verse.service.js';
 import { generatePersonalizedNote } from './nlp.service.js';
 import { semanticVerseSearch, type SemanticMatch } from './semanticSearch.service.js';
+import { getNearbyActivities } from './activityProvider.service.js';
 import {
   getFallbackVerseKeys,
   CRISIS_VERSE_KEY,
   CRISIS_SUPPORT_VERSE_KEYS,
 } from '../utils/emotionTaxonomy.js';
+import { getActivityCategories } from '../utils/activityTaxonomy.js';
 
 // ─── Crisis Resources ─────────────────────────────────────────────────────────
 
@@ -265,4 +270,82 @@ export async function getRecommendations(
   }
 
   return result;
+}
+
+// ─── Activity Recommendations (real-world, not scripture) ────────────────────
+//
+// A second recommendation track alongside verses: instead of "what does the
+// Quran say about this feeling," this answers "what's something I could
+// actually go do right now." Reuses the same shape of reasoning as
+// scoreVerse — a curated priority list (activityTaxonomy.ts) blended with
+// contextual signals (open-now, distance) — and the same "always have a
+// deterministic fallback" philosophy as the verse RAG layer: with no API
+// key configured, activityProvider.service.ts returns a hand-written sample
+// catalog instead of nothing.
+
+const CATEGORY_PRIORITY_WEIGHT = 0.4;
+const OPEN_NOW_WEIGHT = 0.3;
+const DISTANCE_WEIGHT = 0.3;
+const MAX_RELEVANT_DISTANCE_KM = 8;
+
+/**
+ * Computes a relevance score [0, 1] for an activity suggestion, given the
+ * ordered category priority list for the user's current emotion.
+ */
+export function scoreActivity(
+  suggestion: ActivitySuggestion,
+  priorityCategories: ActivityCategory[],
+): number {
+  const priorityIndex = priorityCategories.indexOf(suggestion.category);
+  const priorityScore =
+    priorityIndex >= 0
+      ? ((priorityCategories.length - priorityIndex) / priorityCategories.length) *
+        CATEGORY_PRIORITY_WEIGHT
+      : 0;
+
+  // Unknown open status gets a middling score rather than being penalized
+  // outright — we shouldn't assume something's closed just because we
+  // don't have hours data for it (e.g. some Google Places results omit
+  // opening_hours entirely).
+  const openScore =
+    suggestion.is_open_now === true
+      ? OPEN_NOW_WEIGHT
+      : suggestion.is_open_now === false
+        ? 0
+        : OPEN_NOW_WEIGHT * 0.5;
+
+  const distance = suggestion.distance_km ?? MAX_RELEVANT_DISTANCE_KM / 2;
+  const distanceScore =
+    Math.max(0, (MAX_RELEVANT_DISTANCE_KM - distance) / MAX_RELEVANT_DISTANCE_KM) *
+    DISTANCE_WEIGHT;
+
+  const rawScore = priorityScore + openScore + distanceScore;
+  return Math.min(1, Math.max(0, rawScore));
+}
+
+/**
+ * Generates real-world activity suggestions for a given emotional profile
+ * and location. Returns an empty array (never throws) if location is
+ * unavailable or the lookup fails — callers should treat this exactly like
+ * an optional field, the same way crisis_resources is optional on
+ * CheckinResponse.
+ */
+export async function getActivityRecommendations(
+  profile: EmotionalProfile,
+  location: LocationContext,
+  now: Date = new Date(),
+): Promise<ActivitySuggestion[]> {
+  const categories = getActivityCategories(profile.primary_emotion);
+
+  const candidates = await getNearbyActivities(location, categories, now);
+  if (candidates.length === 0) return [];
+
+  const scored = candidates
+    .map((suggestion) => ({
+      ...suggestion,
+      relevance_score: Math.round(scoreActivity(suggestion, categories) * 1000) / 1000,
+    }))
+    .sort((a, b) => b.relevance_score - a.relevance_score);
+
+  return scored.slice(0, 4);
 }

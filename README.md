@@ -11,7 +11,7 @@ Frontend: [nur-mobile](https://github.com/yujikarlyoshida/nur-mobile)
 - **Anthropic Claude API** for emotion classification and personalized notes
 - **Voyage AI embeddings + pgvector** for semantic verse retrieval (RAG layer — optional, see below)
 - **Quran.com API v4** for verse text and translations
-- **Google Places API** for real-world activity suggestions (optional, see below — a sample catalog is used otherwise)
+- **Google Places API** for real-world activity suggestions, plus optionally the **Distance Matrix API** for real-time traffic-aware travel time (optional, see below — a sample catalog is used otherwise)
 - **Supabase** (Postgres) for check-in persistence and vector search
 - `@fastify/helmet`, `@fastify/cors`, `@fastify/sensible` for security and error handling
 - **Vitest** for unit tests, **GitHub Actions** for CI, **Docker** for deployment
@@ -95,6 +95,15 @@ Every activity suggestion — sample or live — is halal-conscious by construct
 This is a best-effort filter, not a halal-certification check — Google's public API doesn't expose certification data, so nothing here can *guarantee* a venue is certified halal. See `tests/halalFilter.test.ts` for the exact cases covered, and extend `EXCLUDED_NAME_PATTERNS` in `activityProvider.service.ts` if a gap shows up in practice.
 
 The activity taxonomy (`activityTaxonomy.ts`) also maps each emotion to 3 categories now instead of 2, and the Places search radius/result count were widened (12km, up to 8 candidates per category before scoring) — a broader, more varied pool for the same amount of location data.
+
+#### Traffic and parking (time-based, stress-aware)
+
+The point of a suggestion is to help, not to add a stressful drive on top of whatever the user is already feeling — so every live suggestion also carries two signals that pull its relevance score down when they'd make getting there a hassle:
+
+- **`travel_time_minutes` / `traffic_delay_minutes` — real data.** Enable the **Distance Matrix API** in the same Google Cloud project as Places (it's a separate API to turn on, same API key). With it enabled, each suggestion gets a live driving-time lookup (`departure_time=now`, `traffic_model=best_guess`) — genuine current traffic, not an estimate. Without it (or on any lookup failure), the suggestion just ships without these fields rather than breaking the request, same fail-soft pattern as everything else optional here.
+- **`parking_difficulty` — a heuristic, like `vibe`.** There's no free public API for real-time parking-spot availability, so this is estimated from category (dedicated-lot venues like parks and mosques default easier than dense dining/nightlife-adjacent venues), current time (rush hour and weekend evenings skew harder everywhere), review volume, and price level. See `estimateParkingDifficulty()` in `activityProvider.service.ts`.
+
+Both feed into `scoreActivity()` in `recommendation.service.ts` alongside category fit, open-now status, and distance — a technically-relevant venue that requires sitting in traffic and hunting for parking now scores below an equally relevant one that's easy to actually get to. Missing data (API not enabled, a failed lookup) gets a neutral score rather than a penalty — the same treatment already given to unknown open-now status.
 
 ### Seeding 50 demo users
 

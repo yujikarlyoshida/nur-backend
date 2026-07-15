@@ -43,6 +43,22 @@
 // is halal-certified. See the README for this caveat and how to extend the
 // blocklist.
 //
+// A note on time-based stress reduction (traffic + parking): the whole
+// point of this feature is to reduce stress, not add a stressful drive on
+// top of it. Two more signals per suggestion, one real and one estimated:
+//   - `travel_time_minutes` / `traffic_delay_minutes` are REAL, current
+//     driving time and traffic delay from Google's Distance Matrix API
+//     (departure_time=now, traffic_model=best_guess) — genuine traffic
+//     data, not a heuristic, when GOOGLE_PLACES_API_KEY's project also has
+//     the Distance Matrix API enabled.
+//   - `parking_difficulty` IS a heuristic, same caveat as `vibe`: there is
+//     no free public API for real-time parking-spot availability. It's
+//     estimated from category, current time (rush hour / weekend evening),
+//     review volume, and price level — see estimateParkingDifficulty().
+// Both feed into scoreActivity() in recommendation.service.ts so a
+// high-traffic, hard-to-park suggestion ranks below an equally relevant one
+// that's easier to actually get to right now.
+//
 // Swapping in a different provider (Yelp Fusion, Foursquare, etc.) later
 // means adding a sibling to fetchFromGooglePlaces and branching in
 // getNearbyActivities — the rest of the app (recommendation.service.ts,
@@ -51,10 +67,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { randomUUID } from 'crypto';
-import type { ActivityCategory, ActivitySuggestion, LocationContext, Vibe } from '../types/index.js';
+import type {
+  ActivityCategory,
+  ActivitySuggestion,
+  LocationContext,
+  ParkingDifficulty,
+  Vibe,
+} from '../types/index.js';
 
 const GOOGLE_PLACES_NEARBY_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
 const GOOGLE_PLACES_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
+const GOOGLE_DISTANCE_MATRIX_URL = 'https://maps.googleapis.com/maps/api/distancematrix/json';
 
 // ─── Sample Catalog ────────────────────────────────────────────────────────────
 
@@ -154,6 +177,56 @@ function adjustVibeForTime(base: Vibe, localHour: number, dayOfWeek: number): Vi
   return base;
 }
 
+// Baseline parking difficulty per category — dedicated-lot venues (parks,
+// mosques, trailheads) default to 'easy'; dense commercial/dining venues
+// default harder. Same role as CATEGORY_BASE_VIBE, shared by both the
+// sample catalog and the Google Places heuristic (estimateParkingDifficulty)
+// so the two sources behave consistently.
+const CATEGORY_BASE_PARKING: Record<ActivityCategory, ParkingDifficulty> = {
+  calm_nature: 'easy',
+  physical_release: 'moderate',
+  social_gathering: 'moderate',
+  quiet_reflection: 'easy',
+  adventure: 'easy',
+  creative_or_learning: 'moderate',
+  service_or_community: 'moderate',
+  celebration: 'hard',
+};
+
+/**
+ * Nudges a baseline parking difficulty by time of day — rush hour and
+ * weekend evenings make parking harder everywhere, not just at inherently
+ * hard-to-park venues. Mirrors adjustVibeForTime's shape.
+ */
+function adjustParkingForTime(base: ParkingDifficulty, localHour: number, dayOfWeek: number): ParkingDifficulty {
+  const isRushHour = (localHour >= 7 && localHour < 9) || (localHour >= 16 && localHour < 19);
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+  const isWeekendEvening = isWeekend && localHour >= 17 && localHour <= 22;
+
+  if ((isRushHour || isWeekendEvening) && base === 'moderate') return 'hard';
+  if ((isRushHour || isWeekendEvening) && base === 'easy') return 'moderate';
+  return base;
+}
+
+/**
+ * Deterministic stand-in for traffic delay in the sample catalog — 0
+ * outside rush hour, otherwise a small hash-seeded delay (3-15 min) so the
+ * same venue + time always renders the same value instead of jumping
+ * around. Real traffic delay (from Google's Distance Matrix API) is only
+ * available for live results — see fetchTrafficInfo.
+ */
+function pseudoTrafficDelayMinutes(seed: string, localHour: number, dayOfWeek: number): number {
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+  const isRushHour = !isWeekend && ((localHour >= 7 && localHour < 9) || (localHour >= 16 && localHour < 19));
+  if (!isRushHour) return 0;
+
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  }
+  return 3 + (hash % 13); // 3-15 minutes
+}
+
 function formatHours([open, close]: [number, number]): string {
   if (open === 0 && close === 24) return 'Open 24 hours';
   const fmt = (h: number) => {
@@ -183,6 +256,12 @@ function getSampleActivities(
     for (const template of SAMPLE_CATALOG[category]) {
       const distance_km = pseudoDistanceKm(location, template.name);
       const open = isOpenNow(template.hours, localHour);
+      const traffic_delay_minutes = pseudoTrafficDelayMinutes(template.name, localHour, dayOfWeek);
+      // Rough driving-time estimate from distance alone (~25km/h average
+      // urban speed) plus the synthetic delay above — consistent in shape
+      // with the live path's real Distance Matrix figures, but explicitly
+      // synthetic like the rest of the sample catalog.
+      const travel_time_minutes = Math.round((distance_km / 25) * 60) + traffic_delay_minutes;
       suggestions.push({
         id: randomUUID(),
         name: template.name,
@@ -192,6 +271,9 @@ function getSampleActivities(
         typical_hours: formatHours(template.hours),
         is_open_now: open,
         vibe: adjustVibeForTime(template.baseVibe, localHour, dayOfWeek),
+        travel_time_minutes,
+        traffic_delay_minutes,
+        parking_difficulty: adjustParkingForTime(CATEGORY_BASE_PARKING[category], localHour, dayOfWeek),
         relevance_score: 0, // scored by recommendation.service.ts
         source: 'sample',
       });
@@ -345,6 +427,92 @@ function estimateVibe(
   return adjustVibeForTime(vibe, now.getHours(), now.getDay());
 }
 
+/**
+ * Estimates parking difficulty from free Places data: a category baseline
+ * (dedicated-lot venues like parks/mosques default easier than dense
+ * dining/nightlife-adjacent venues), nudged by review volume and price
+ * level (busy, upscale venues tend to sit in denser commercial areas), then
+ * adjusted for rush hour / weekend evening the same way vibe is. This is a
+ * heuristic — there's no free real-time parking-availability API — see the
+ * file header comment.
+ */
+function estimateParkingDifficulty(
+  category: ActivityCategory,
+  now: Date,
+  userRatingsTotal?: number,
+  priceLevel?: number,
+): ParkingDifficulty {
+  let parking = CATEGORY_BASE_PARKING[category];
+
+  if (userRatingsTotal !== undefined && userRatingsTotal > 1000 && parking === 'moderate') {
+    parking = 'hard'; // high review volume ~ popular, likely a denser area
+  }
+  if (priceLevel !== undefined && priceLevel >= 3 && parking !== 'hard') {
+    parking = parking === 'easy' ? 'moderate' : 'hard'; // upscale venues skew urban/dense
+  }
+
+  return adjustParkingForTime(parking, now.getHours(), now.getDay());
+}
+
+interface GoogleDistanceMatrixResult {
+  rows?: Array<{
+    elements?: Array<{
+      status: string;
+      duration?: { value: number }; // seconds, free-flow
+      duration_in_traffic?: { value: number }; // seconds, current traffic
+    }>;
+  }>;
+  status: string;
+}
+
+/**
+ * Fetches real, current-traffic driving time for one destination via
+ * Google's Distance Matrix API (departure_time=now, traffic_model=best_guess
+ * — this is genuine traffic data, not a heuristic, unlike parking above).
+ * Best-effort: any failure (network, quota, or the Distance Matrix API not
+ * being enabled on the project) just means the suggestion ships without
+ * travel_time_minutes / traffic_delay_minutes rather than failing the
+ * request. Called once per Nearby Search result, in parallel — see
+ * fetchFromGooglePlaces.
+ */
+async function fetchTrafficInfo(
+  origin: LocationContext,
+  destination: { lat: number; lng: number },
+  apiKey: string,
+): Promise<{ travelTimeMinutes?: number; trafficDelayMinutes?: number }> {
+  try {
+    const params = new URLSearchParams({
+      origins: `${origin.latitude},${origin.longitude}`,
+      destinations: `${destination.lat},${destination.lng}`,
+      departure_time: 'now',
+      traffic_model: 'best_guess',
+      mode: 'driving',
+      key: apiKey,
+    });
+
+    const response = await fetch(`${GOOGLE_DISTANCE_MATRIX_URL}?${params.toString()}`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) return {};
+
+    const data = (await response.json()) as GoogleDistanceMatrixResult;
+    if (data.status !== 'OK') return {};
+
+    const element = data.rows?.[0]?.elements?.[0];
+    if (!element || element.status !== 'OK' || !element.duration) return {};
+
+    const withTrafficSeconds = element.duration_in_traffic?.value ?? element.duration.value;
+    const freeFlowSeconds = element.duration.value;
+
+    return {
+      travelTimeMinutes: Math.round(withTrafficSeconds / 60),
+      trafficDelayMinutes: Math.max(0, Math.round((withTrafficSeconds - freeFlowSeconds) / 60)),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function isPlacesProviderConfigured(): boolean {
   return Boolean(process.env['GOOGLE_PLACES_API_KEY']);
 }
@@ -442,13 +610,17 @@ async function fetchFromGooglePlaces(
 
   const topResults = halalFriendly.slice(0, 8);
 
-  // Hours enrichment happens in parallel across all candidates in this
-  // category, not sequentially — one Details call per candidate, all fired
-  // at once, so latency is ~1 round trip regardless of how many results
-  // came back.
-  const hoursByPlace = await Promise.all(
-    topResults.map((place) => fetchPlaceHours(place.place_id, apiKey, now)),
-  );
+  // Hours and traffic enrichment both happen in parallel across all
+  // candidates in this category — and alongside each other, not
+  // sequentially — one Details call and one Distance Matrix call per
+  // candidate, all fired at once, so latency stays ~1 round trip
+  // regardless of how many results came back.
+  const [hoursByPlace, trafficByPlace] = await Promise.all([
+    Promise.all(topResults.map((place) => fetchPlaceHours(place.place_id, apiKey, now))),
+    Promise.all(
+      topResults.map((place) => fetchTrafficInfo(location, place.geometry.location, apiKey)),
+    ),
+  ]);
 
   return topResults.map((place, i) => ({
     id: place.place_id,
@@ -462,6 +634,9 @@ async function fetchFromGooglePlaces(
     vibe: estimateVibe(category, now, place.user_ratings_total, place.price_level),
     rating: place.rating,
     review_count: place.user_ratings_total,
+    travel_time_minutes: trafficByPlace[i]?.travelTimeMinutes,
+    traffic_delay_minutes: trafficByPlace[i]?.trafficDelayMinutes,
+    parking_difficulty: estimateParkingDifficulty(category, now, place.user_ratings_total, place.price_level),
     relevance_score: 0, // scored by recommendation.service.ts
     source: 'google_places' as const,
   }));

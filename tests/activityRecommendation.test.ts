@@ -85,6 +85,39 @@ describe('scoreActivity (pure scoring function)', () => {
 
     expect(unknown).toBeGreaterThan(closed);
   });
+
+  it('scores a venue with no traffic delay above an otherwise-identical one with a long delay', () => {
+    const categories = ['calm_nature'] as const;
+    const noDelay = scoreActivity(makeSuggestion({ traffic_delay_minutes: 0 }), [...categories]);
+    const delayed = scoreActivity(makeSuggestion({ traffic_delay_minutes: 25 }), [...categories]);
+
+    expect(noDelay).toBeGreaterThan(delayed);
+  });
+
+  it('scores easy parking above hard parking, all else equal', () => {
+    const categories = ['calm_nature'] as const;
+    const easy = scoreActivity(makeSuggestion({ parking_difficulty: 'easy' }), [...categories]);
+    const hard = scoreActivity(makeSuggestion({ parking_difficulty: 'hard' }), [...categories]);
+
+    expect(easy).toBeGreaterThan(hard);
+  });
+
+  it('does not penalize unknown traffic delay or parking difficulty as heavily as known-bad values', () => {
+    const categories = ['calm_nature'] as const;
+    const unknownTraffic = scoreActivity(
+      makeSuggestion({ traffic_delay_minutes: undefined }),
+      [...categories],
+    );
+    const badTraffic = scoreActivity(makeSuggestion({ traffic_delay_minutes: 25 }), [...categories]);
+    expect(unknownTraffic).toBeGreaterThan(badTraffic);
+
+    const unknownParking = scoreActivity(
+      makeSuggestion({ parking_difficulty: undefined }),
+      [...categories],
+    );
+    const hardParking = scoreActivity(makeSuggestion({ parking_difficulty: 'hard' }), [...categories]);
+    expect(unknownParking).toBeGreaterThan(hardParking);
+  });
 });
 
 describe('getActivityRecommendations', () => {

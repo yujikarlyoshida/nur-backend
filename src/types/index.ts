@@ -148,6 +148,14 @@ export interface LocationContext {
 // activityProvider.service.ts's estimateLiveliness() for the heuristic.
 export type Vibe = 'quiet' | 'moderate' | 'lively';
 
+// How hard parking is likely to be near a suggestion. Unlike traffic delay,
+// this genuinely isn't available as real-time data through any free public
+// API (no live parking-spot-availability feed), so it's estimated from
+// category, current time (rush hour / weekend evening), review volume, and
+// price level — see activityProvider.service.ts's estimateParkingDifficulty().
+// A heuristic, not a measurement, same caveat as `vibe`.
+export type ParkingDifficulty = 'easy' | 'moderate' | 'hard';
+
 export interface ActivitySuggestion {
   id: string;
   name: string;
@@ -163,6 +171,12 @@ export interface ActivitySuggestion {
   vibe?: Vibe;
   rating?: number;
   review_count?: number;
+  /** Real drive time right now, including current traffic, in minutes (Google Distance Matrix). */
+  travel_time_minutes?: number;
+  /** How much longer than free-flow the drive is right now, in minutes, due to current traffic. */
+  traffic_delay_minutes?: number;
+  /** Estimated, not measured — see the ParkingDifficulty doc comment. */
+  parking_difficulty?: ParkingDifficulty;
   relevance_score: number;
   /** Where this suggestion came from — lets the UI/analytics distinguish real data from the sample catalog. */
   source: 'sample' | 'google_places';

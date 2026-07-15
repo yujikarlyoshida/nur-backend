@@ -278,19 +278,40 @@ export async function getRecommendations(
 // Quran say about this feeling," this answers "what's something I could
 // actually go do right now." Reuses the same shape of reasoning as
 // scoreVerse — a curated priority list (activityTaxonomy.ts) blended with
-// contextual signals (open-now, distance) — and the same "always have a
-// deterministic fallback" philosophy as the verse RAG layer: with no API
-// key configured, activityProvider.service.ts returns a hand-written sample
-// catalog instead of nothing.
+// contextual signals (open-now, distance, current traffic, estimated
+// parking difficulty) — and the same "always have a deterministic
+// fallback" philosophy as the verse RAG layer: with no API key configured,
+// activityProvider.service.ts returns a hand-written sample catalog instead
+// of nothing.
+//
+// Traffic and parking exist specifically so the app doesn't work against
+// its own purpose: a relevant suggestion that requires sitting in traffic
+// and hunting for parking adds stress instead of relieving it, so both
+// pull a suggestion's score down (see scoreActivity below).
 
-const CATEGORY_PRIORITY_WEIGHT = 0.4;
-const OPEN_NOW_WEIGHT = 0.3;
-const DISTANCE_WEIGHT = 0.3;
+const CATEGORY_PRIORITY_WEIGHT = 0.3;
+const OPEN_NOW_WEIGHT = 0.2;
+const DISTANCE_WEIGHT = 0.2;
+const TRAFFIC_WEIGHT = 0.15;
+const PARKING_WEIGHT = 0.15;
 const MAX_RELEVANT_DISTANCE_KM = 8;
+// Traffic delays beyond this are treated as equally bad — the point isn't
+// to precisely rank a 25-vs-30-minute delay, just to clearly favour "no
+// meaningful delay" over "significant delay" when everything else is equal.
+const MAX_RELEVANT_TRAFFIC_DELAY_MIN = 20;
 
 /**
  * Computes a relevance score [0, 1] for an activity suggestion, given the
  * ordered category priority list for the user's current emotion.
+ *
+ * Weighs two stress-reduction signals alongside the original three
+ * (category fit, open-now, distance): current traffic delay and estimated
+ * parking difficulty. The whole point of suggesting something is to help —
+ * a technically-relevant venue that requires a stressful drive and a
+ * parking hunt works against that, so both pull the score down. Missing
+ * data (no API key configured, a failed lookup) gets a neutral half-weight
+ * rather than a penalty, same treatment as unknown open-now status below —
+ * we shouldn't assume the worst just because we don't have the data.
  */
 export function scoreActivity(
   suggestion: ActivitySuggestion,
@@ -319,7 +340,25 @@ export function scoreActivity(
     Math.max(0, (MAX_RELEVANT_DISTANCE_KM - distance) / MAX_RELEVANT_DISTANCE_KM) *
     DISTANCE_WEIGHT;
 
-  const rawScore = priorityScore + openScore + distanceScore;
+  const trafficScore =
+    suggestion.traffic_delay_minutes === undefined
+      ? TRAFFIC_WEIGHT * 0.5
+      : Math.max(
+          0,
+          (MAX_RELEVANT_TRAFFIC_DELAY_MIN - suggestion.traffic_delay_minutes) /
+            MAX_RELEVANT_TRAFFIC_DELAY_MIN,
+        ) * TRAFFIC_WEIGHT;
+
+  const parkingScore =
+    suggestion.parking_difficulty === 'easy'
+      ? PARKING_WEIGHT
+      : suggestion.parking_difficulty === 'moderate'
+        ? PARKING_WEIGHT * 0.5
+        : suggestion.parking_difficulty === 'hard'
+          ? 0
+          : PARKING_WEIGHT * 0.5; // unknown -> neutral
+
+  const rawScore = priorityScore + openScore + distanceScore + trafficScore + parkingScore;
   return Math.min(1, Math.max(0, rawScore));
 }
 

@@ -173,7 +173,7 @@ export async function classifyEmotion(
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       max_tokens: 400,
       system: buildSystemPrompt(language),
       messages: [{ role: 'user', content: text }],

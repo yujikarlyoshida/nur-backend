@@ -62,6 +62,8 @@ export interface CheckinRequest {
   mood_selected?: EmotionState;
   language?: string;
   location?: LocationContext;
+  /** Hard filter on activity_suggestions — only applies when location is also sent. */
+  vibe?: Vibe;
 }
 
 export interface CheckinResponse {
@@ -138,6 +140,14 @@ export interface LocationContext {
   timezone?: string;
 }
 
+// "How busy/energetic" a suggestion is expected to be. Google doesn't
+// publish real-time foot-traffic data through its public Places API, so
+// this is estimated for free from signals the API does expose — rating,
+// review volume, price level, category, and time-of-day — rather than
+// requiring a paid third-party foot-traffic service. See
+// activityProvider.service.ts's estimateLiveliness() for the heuristic.
+export type Vibe = 'quiet' | 'moderate' | 'lively';
+
 export interface ActivitySuggestion {
   id: string;
   name: string;
@@ -145,8 +155,14 @@ export interface ActivitySuggestion {
   description: string;
   /** Straight-line distance from the user's location, in km. */
   distance_km?: number;
+  /** Human-readable hours for today, e.g. "9am–9pm". */
   typical_hours?: string;
   is_open_now?: boolean;
+  /** Set when today's hours differ from the usual schedule (holiday/special hours). */
+  special_hours_today?: boolean;
+  vibe?: Vibe;
+  rating?: number;
+  review_count?: number;
   relevance_score: number;
   /** Where this suggestion came from — lets the UI/analytics distinguish real data from the sample catalog. */
   source: 'sample' | 'google_places';

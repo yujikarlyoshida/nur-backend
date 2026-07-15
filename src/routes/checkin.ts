@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { safeScrubPII } from '../utils/piiScrubber.js';
 import { classifyEmotion } from '../services/nlp.service.js';
-import { getRecommendations, getActivityRecommendations } from '../services/recommendation.service.js';
+import { runRecommendationProviders } from '../services/recommendationProviders.js';
 import type { CheckinRequest, CheckinResponse } from '../types/index.js';
 import { getAllEmotions } from '../utils/emotionTaxonomy.js';
 
@@ -32,6 +32,9 @@ const checkinBodySchema = z.object({
   // real-world activity_suggestions alongside verse recommendations; the
   // app works fully without it, same as everything else optional here.
   location: locationSchema.optional(),
+  // Hard filter on activity_suggestions (see activityProvider.service.ts's
+  // estimateVibe) — only meaningful alongside `location`.
+  vibe: z.enum(['quiet', 'moderate', 'lively']).optional(),
 });
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
@@ -66,6 +69,7 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
                 timezone: { type: 'string' },
               },
             },
+            vibe: { type: 'string', enum: ['quiet', 'moderate', 'lively'] },
           },
         },
       },
@@ -81,7 +85,7 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const body = parseResult.data as CheckinRequest;
-      const { input_type, mood_selected, language, location } = body;
+      const { input_type, mood_selected, language, location, vibe } = body;
       let { text } = body;
 
       // ── 2. Validate business logic ───────────────────────────────────────
@@ -118,31 +122,18 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      // ── 5. Generate verse recommendations ───────────────────────────────
-      let recommendations: import('../types/index.js').VerseRecommendation[];
-      let crisis_resources: import('../types/index.js').CrisisResources | undefined;
-      try {
-        const result = await getRecommendations(emotionalProfile, language, text);
-        recommendations = result.recommendations;
-        crisis_resources = result.crisis_resources;
-      } catch (err) {
-        app.log.error({ err }, 'Recommendation generation failed');
-        // Return partial response rather than a full 500
-        recommendations = [];
-      }
-
-      // ── 6. Generate real-world activity suggestions (only if the client
-      //       sent a location — this is purely additive, see
-      //       getActivityRecommendations for the graceful-fallback design) ──
-      let activity_suggestions: import('../types/index.js').ActivitySuggestion[] | undefined;
-      if (location) {
-        try {
-          activity_suggestions = await getActivityRecommendations(emotionalProfile, location);
-        } catch (err) {
-          app.log.warn({ err }, 'Activity suggestion generation failed');
-          // Omit the field rather than fail the whole check-in
-        }
-      }
+      // ── 5+6. Generate verse recommendations and (if a location was sent)
+      //          real-world activity suggestions — concurrently, via the
+      //          provider registry (see recommendationProviders.ts). Verses
+      //          are always attempted; activities only run when applicable.
+      //          One provider failing never blocks or breaks the other. ──
+      const contribution = await runRecommendationProviders(
+        { profile: emotionalProfile, language, rawText: text, location, vibe },
+        undefined,
+        (providerName, err) => app.log.warn({ err, provider: providerName }, 'Recommendation provider failed'),
+      );
+      const recommendations = contribution.recommendations ?? [];
+      const { crisis_resources, activity_suggestions } = contribution;
 
       // ── 7. Persist check-in to Supabase (best-effort, non-blocking) ──────
       const checkinId = randomUUID();

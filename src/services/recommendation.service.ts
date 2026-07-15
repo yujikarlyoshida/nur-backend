@@ -329,15 +329,21 @@ export function scoreActivity(
  * unavailable or the lookup fails — callers should treat this exactly like
  * an optional field, the same way crisis_resources is optional on
  * CheckinResponse.
+ *
+ * `vibe`, if given, hard-filters candidates to quiet/moderate/lively
+ * (see activityProvider.service.ts) before scoring — this powers the
+ * mobile app's Quiet/Lively toggle when a client wants the server to do
+ * the filtering rather than filtering the returned list itself.
  */
 export async function getActivityRecommendations(
   profile: EmotionalProfile,
   location: LocationContext,
   now: Date = new Date(),
+  vibe?: import('../types/index.js').Vibe,
 ): Promise<ActivitySuggestion[]> {
   const categories = getActivityCategories(profile.primary_emotion);
 
-  const candidates = await getNearbyActivities(location, categories, now);
+  const candidates = await getNearbyActivities(location, categories, now, vibe);
   if (candidates.length === 0) return [];
 
   const scored = candidates
@@ -347,5 +353,8 @@ export async function getActivityRecommendations(
     }))
     .sort((a, b) => b.relevance_score - a.relevance_score);
 
-  return scored.slice(0, 4);
+  // Returns a slightly larger pool than before (6, not 4) so a client-side
+  // Quiet/Lively toggle (see the mobile app) has enough of both to work
+  // with without needing a second network round trip.
+  return scored.slice(0, 6);
 }

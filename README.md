@@ -23,15 +23,32 @@ Frontend: [nur-mobile](https://github.com/yujikarlyoshida/nur-mobile)
 3. The input is classified into an emotional profile (primary emotion, intensity, spiritual need, life domain, themes) via Claude, with built-in crisis-signal detection.
 4. Candidate verses are gathered from two independent sources and blended: a hand-curated, reviewed taxonomy (`emotionTaxonomy.ts`, always available) and, when configured, semantic similarity search over verse embeddings (`semanticSearch.service.ts` — genuine RAG, not just an LLM call). The curated list is the deterministic safety net; semantic search augments relevance without ever fully replacing it — see the comments in `recommendation.service.ts` for why that split matters for a faith-context product.
 5. Each recommended verse gets a personalized note explaining why it fits.
-6. If the client sends `location` (`{ latitude, longitude }`), a second, independent recommendation track runs alongside verses: `activity_suggestions` — real-world things to do nearby, matched to the same emotional profile and the current time of day (`activityTaxonomy.ts` + `activityProvider.service.ts`). This is optional and additive; check-ins without a location behave exactly as they did before this existed.
-7. The check-in and recommendations are persisted to Supabase on a best-effort basis (non-blocking — a DB failure never breaks the response).
-8. If a crisis signal is detected, the response includes `crisis_resources` with hotline info.
+6. If the client sends `location` (`{ latitude, longitude }`), a second, independent recommendation track runs alongside verses: `activity_suggestions` — real-world things to do nearby, matched to the same emotional profile, the current time of day, and (if `vibe` is sent) a hard quiet/moderate/lively filter (`activityTaxonomy.ts` + `activityProvider.service.ts`). This is optional and additive; check-ins without a location behave exactly as they did before this existed.
+7. Verses and activities run **concurrently**, not one after another — see "Architecture" below.
+8. The check-in and recommendations are persisted to Supabase on a best-effort basis (non-blocking — a DB failure never breaks the response).
+9. If a crisis signal is detected, the response includes `crisis_resources` with hotline info.
+
+## Architecture: adding a new recommendation type
+
+Verses and activities are both implementations of one `RecommendationProvider` interface (`src/services/recommendationProviders.ts`):
+
+```ts
+interface RecommendationProvider {
+  name: string;
+  isApplicable(ctx: RecommendationContext): boolean;
+  run(ctx: RecommendationContext): Promise<RecommendationContribution>;
+}
+```
+
+`checkin.ts` doesn't call `getRecommendations` and `getActivityRecommendations` directly — it calls `runRecommendationProviders(ctx)` once, which runs every applicable provider **concurrently** via `Promise.allSettled` and merges whatever comes back. One provider throwing never blocks or breaks the others.
+
+To add a third recommendation type (dhikr reminders, community events, whatever's next): write a provider that implements the interface and add it to `REGISTERED_PROVIDERS`. Nothing in the route handler needs to change.
 
 ## Endpoints
 
 | Method | Route | Description |
 |---|---|---|
-| `POST` | `/api/checkin` | Submit emotional input (+ optional location), get back an emotional profile, verse recommendations, and (if location was sent) `activity_suggestions` |
+| `POST` | `/api/checkin` | Submit emotional input (+ optional `location`, `vibe`), get back an emotional profile, verse recommendations, and (if location was sent) `activity_suggestions` |
 | `GET` | `/api/verses/*` | Verse lookup helpers |
 | `GET` | `/api/recommendations/*` | Recommendation helpers |
 | `GET` | `/health` | Health check |
@@ -68,6 +85,8 @@ Send a `location` field with a check-in and the app returns `activity_suggestion
 
 That's it — no schema changes, no backfill job. Suggestions are scored the same way either way (category priority for the detected emotion, open-now status, distance); only the venue data source changes.
 
+With a key configured, each suggestion is also enriched with today's regular + holiday/special hours (a Place Details call per result, run concurrently) and a `vibe` (`quiet` / `moderate` / `lively`). On foot traffic specifically: Google doesn't expose real-time or predicted busyness through its public Places API (that's a paid third-party service like BestTime.app, not something this app integrates) — `vibe` is instead *estimated* for free from category, rating, review volume, price level, and time of day (`estimateVibe()` in `activityProvider.service.ts`). Send `vibe: "quiet" | "moderate" | "lively"` in the check-in request to hard-filter results server-side; the mobile app instead filters client-side over an already-returned pool so its Quiet/Lively toggle doesn't need a second request.
+
 ### Seeding 50 demo users
 
 For testing or demoing against a populated database rather than an empty one:
@@ -99,3 +118,4 @@ eb deploy
 - 13-emotion taxonomy shared with the mobile app: anxiety, sadness, anger, loneliness, gratitude, hope, guilt, confusion, peace, overwhelmed, grief, disconnection, joy.
 - Semantic search is intentionally additive, not a replacement for the curated taxonomy — see the design note at the top of `src/db/schema.sql`'s `verse_embeddings` section for the reasoning.
 - Activity suggestions are a second, independent recommendation type (real-world actions, not scripture) — see the design note at the top of `recommendation.service.ts`'s activity section for how it's scored and why it stays optional.
+- Performance: verse text is cached in-memory (1hr TTL, `verse.service.ts`) so repeat check-ins referencing the same well-known verses don't re-hit Quran.com. Activity category lookups run concurrently, not sequentially. Verse and activity recommendations run concurrently via the provider registry (see "Architecture" above) rather than one after another.

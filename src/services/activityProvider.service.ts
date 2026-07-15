@@ -10,11 +10,21 @@
 //      is synthesized deterministically from the user's coordinates so the
 //      UI has something plausible to render without hitting a paid API.
 //
-//   2. Google Places Nearby Search (optional) — used automatically when
-//      GOOGLE_PLACES_API_KEY is set. Real venues, real hours, real
-//      distance. Falls back to the sample catalog on any error (missing
-//      key, network failure, quota) so a misconfigured or rate-limited API
+//   2. Google Places (optional) — used automatically when
+//      GOOGLE_PLACES_API_KEY is set. Real venues, real distance, and (via a
+//      follow-up Place Details call per result) real weekly + holiday
+//      hours. Falls back to the sample catalog on any error (missing key,
+//      network failure, quota) so a misconfigured or rate-limited API
 //      never breaks the check-in response.
+//
+// A note on "foot traffic": Google does not expose real-time or predicted
+// busyness through its public Places API (the "Popular times" graph you
+// see on Google Maps isn't part of the API surface — that would require a
+// paid third-party service like BestTime.app). Instead, `vibe` (quiet /
+// moderate / lively) is *estimated* from signals the API does provide —
+// category, rating, review volume, price level, and time of day — via
+// estimateVibe() below. It's a heuristic, not a measurement, and is
+// labelled as such in the UI.
 //
 // Swapping in a different provider (Yelp Fusion, Foursquare, etc.) later
 // means adding a sibling to fetchFromGooglePlaces and branching in
@@ -24,9 +34,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { randomUUID } from 'crypto';
-import type { ActivityCategory, ActivitySuggestion, LocationContext } from '../types/index.js';
+import type { ActivityCategory, ActivitySuggestion, LocationContext, Vibe } from '../types/index.js';
 
-const GOOGLE_PLACES_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
+const GOOGLE_PLACES_NEARBY_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
+const GOOGLE_PLACES_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
 
 // ─── Sample Catalog ────────────────────────────────────────────────────────────
 
@@ -35,46 +46,48 @@ interface ActivityTemplate {
   description: string;
   /** [openHour, closeHour) in 24h local time, e.g. [9, 21] = 9am-9pm. */
   hours: [number, number];
+  /** Baseline vibe for this kind of place, before any time-of-day adjustment. */
+  baseVibe: Vibe;
 }
 
 const SAMPLE_CATALOG: Record<ActivityCategory, ActivityTemplate[]> = {
   calm_nature: [
-    { name: 'Riverside walking trail', description: 'A quiet path along the water — good for slowing down.', hours: [6, 21] },
-    { name: 'Botanical garden', description: 'Green space built for unhurried walking and noticing small things.', hours: [8, 18] },
-    { name: 'Public beach access', description: 'Open shoreline, low stimulation, room to breathe.', hours: [0, 24] },
+    { name: 'Riverside walking trail', description: 'A quiet path along the water — good for slowing down.', hours: [6, 21], baseVibe: 'quiet' },
+    { name: 'Botanical garden', description: 'Green space built for unhurried walking and noticing small things.', hours: [8, 18], baseVibe: 'quiet' },
+    { name: 'Public beach access', description: 'Open shoreline, low stimulation, room to breathe.', hours: [0, 24], baseVibe: 'quiet' },
   ],
   physical_release: [
-    { name: 'K1 Speed (indoor go-karting)', description: 'High-adrenaline karting — a physical outlet for restless energy.', hours: [11, 23] },
-    { name: 'Rock climbing gym', description: 'Problem-solving under physical exertion; hard to think about anything else.', hours: [9, 22] },
-    { name: 'Drop-in boxing/kickboxing class', description: 'Structured, supervised way to burn off intensity.', hours: [6, 21] },
+    { name: 'K1 Speed (indoor go-karting)', description: 'High-adrenaline karting — a physical outlet for restless energy.', hours: [11, 23], baseVibe: 'lively' },
+    { name: 'Rock climbing gym', description: 'Problem-solving under physical exertion; hard to think about anything else.', hours: [9, 22], baseVibe: 'moderate' },
+    { name: 'Drop-in boxing/kickboxing class', description: 'Structured, supervised way to burn off intensity.', hours: [6, 21], baseVibe: 'lively' },
   ],
   social_gathering: [
-    { name: 'Public grilling/BBQ pits', description: 'Low-pressure way to get people together over food.', hours: [10, 20] },
-    { name: 'Board game café', description: 'Social without needing to perform — the game gives you something to do.', hours: [11, 23] },
-    { name: 'Community potluck space', description: 'Shared-table gathering spot, often used for iftars and community dinners.', hours: [16, 22] },
+    { name: 'Public grilling/BBQ pits', description: 'Low-pressure way to get people together over food.', hours: [10, 20], baseVibe: 'lively' },
+    { name: 'Board game café', description: 'Social without needing to perform — the game gives you something to do.', hours: [11, 23], baseVibe: 'moderate' },
+    { name: 'Community potluck space', description: 'Shared-table gathering spot, often used for iftars and community dinners.', hours: [16, 22], baseVibe: 'lively' },
   ],
   quiet_reflection: [
-    { name: 'Local mosque', description: 'A place to sit, pray, or just be still.', hours: [0, 24] },
-    { name: 'Library reading room', description: 'Quiet, no obligation to talk to anyone.', hours: [9, 20] },
-    { name: 'Journaling café corner', description: 'A café with a quiet corner good for writing things out.', hours: [7, 21] },
+    { name: 'Local mosque', description: 'A place to sit, pray, or just be still.', hours: [0, 24], baseVibe: 'quiet' },
+    { name: 'Library reading room', description: 'Quiet, no obligation to talk to anyone.', hours: [9, 20], baseVibe: 'quiet' },
+    { name: 'Journaling café corner', description: 'A café with a quiet corner good for writing things out.', hours: [7, 21], baseVibe: 'quiet' },
   ],
   adventure: [
-    { name: 'Hiking trailhead', description: 'A new trail — something to look forward to and plan around.', hours: [6, 19] },
-    { name: 'Trampoline park', description: 'Physically novel, hard to overthink while doing it.', hours: [10, 21] },
-    { name: 'Kayak/paddleboard rental', description: 'New skill, open water, a change of scenery.', hours: [8, 18] },
+    { name: 'Hiking trailhead', description: 'A new trail — something to look forward to and plan around.', hours: [6, 19], baseVibe: 'moderate' },
+    { name: 'Trampoline park', description: 'Physically novel, hard to overthink while doing it.', hours: [10, 21], baseVibe: 'lively' },
+    { name: 'Kayak/paddleboard rental', description: 'New skill, open water, a change of scenery.', hours: [8, 18], baseVibe: 'moderate' },
   ],
   creative_or_learning: [
-    { name: 'Pottery/paint studio drop-in class', description: 'Hands-on, unhurried, produces something at the end.', hours: [10, 21] },
-    { name: 'Independent bookstore', description: 'Browsing with no agenda — good for a wandering mind.', hours: [9, 21] },
+    { name: 'Pottery/paint studio drop-in class', description: 'Hands-on, unhurried, produces something at the end.', hours: [10, 21], baseVibe: 'moderate' },
+    { name: 'Independent bookstore', description: 'Browsing with no agenda — good for a wandering mind.', hours: [9, 21], baseVibe: 'quiet' },
   ],
   service_or_community: [
-    { name: 'Local food bank volunteer shift', description: 'Structured, useful, outward-facing — a break from your own head.', hours: [9, 17] },
-    { name: 'Community center event board', description: 'Drop-in classes and meetups happening nearby this week.', hours: [9, 20] },
+    { name: 'Local food bank volunteer shift', description: 'Structured, useful, outward-facing — a break from your own head.', hours: [9, 17], baseVibe: 'moderate' },
+    { name: 'Community center event board', description: 'Drop-in classes and meetups happening nearby this week.', hours: [9, 20], baseVibe: 'moderate' },
   ],
   celebration: [
-    { name: 'Rooftop dinner spot', description: 'Worth marking the moment somewhere with a view.', hours: [17, 23] },
-    { name: 'Spa & wellness center', description: 'A deliberate, unhurried way to celebrate feeling good.', hours: [9, 20] },
-    { name: 'K1 Speed (indoor go-karting)', description: 'A high-energy way to celebrate with people.', hours: [11, 23] },
+    { name: 'Rooftop dinner spot', description: 'Worth marking the moment somewhere with a view.', hours: [17, 23], baseVibe: 'lively' },
+    { name: 'Spa & wellness center', description: 'A deliberate, unhurried way to celebrate feeling good.', hours: [9, 20], baseVibe: 'quiet' },
+    { name: 'K1 Speed (indoor go-karting)', description: 'A high-energy way to celebrate with people.', hours: [11, 23], baseVibe: 'lively' },
   ],
 };
 
@@ -102,6 +115,33 @@ function isOpenNow(hours: [number, number], localHour: number): boolean {
 }
 
 /**
+ * Nudges a baseline vibe by time of day — a place that's normally
+ * "moderate" tends to feel livelier on a weekend evening and quieter first
+ * thing in the morning. Applied to both the sample catalog and the Google
+ * Places heuristic so the two sources behave consistently.
+ */
+function adjustVibeForTime(base: Vibe, localHour: number, dayOfWeek: number): Vibe {
+  const isEvening = localHour >= 17 && localHour <= 22;
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+  const isEarlyOrLate = localHour < 8 || localHour >= 22;
+
+  if (base === 'moderate' && isEvening && isWeekend) return 'lively';
+  if (base === 'lively' && isEarlyOrLate) return 'moderate';
+  if (base === 'moderate' && isEarlyOrLate) return 'quiet';
+  return base;
+}
+
+function formatHours([open, close]: [number, number]): string {
+  if (open === 0 && close === 24) return 'Open 24 hours';
+  const fmt = (h: number) => {
+    const period = h >= 12 ? 'pm' : 'am';
+    const displayHour = h % 12 === 0 ? 12 : h % 12;
+    return `${displayHour}${period}`;
+  };
+  return `${fmt(open)}–${fmt(close)}`;
+}
+
+/**
  * Returns sample-catalog activity suggestions for the given categories.
  * Always succeeds — this is the deterministic fallback the rest of the app
  * can rely on with zero configuration, same role the curated verse taxonomy
@@ -110,8 +150,10 @@ function isOpenNow(hours: [number, number], localHour: number): boolean {
 function getSampleActivities(
   location: LocationContext,
   categories: ActivityCategory[],
-  localHour: number,
+  now: Date,
 ): ActivitySuggestion[] {
+  const localHour = now.getHours();
+  const dayOfWeek = now.getDay();
   const suggestions: ActivitySuggestion[] = [];
 
   for (const category of categories) {
@@ -126,6 +168,7 @@ function getSampleActivities(
         distance_km,
         typical_hours: formatHours(template.hours),
         is_open_now: open,
+        vibe: adjustVibeForTime(template.baseVibe, localHour, dayOfWeek),
         relevance_score: 0, // scored by recommendation.service.ts
         source: 'sample',
       });
@@ -135,19 +178,9 @@ function getSampleActivities(
   return suggestions;
 }
 
-function formatHours([open, close]: [number, number]): string {
-  if (open === 0 && close === 24) return 'Open 24 hours';
-  const fmt = (h: number) => {
-    const period = h >= 12 ? 'pm' : 'am';
-    const displayHour = h % 12 === 0 ? 12 : h % 12;
-    return `${displayHour}${period}`;
-  };
-  return `${fmt(open)}–${fmt(close)}`;
-}
-
 // ─── Google Places (optional live provider) ────────────────────────────────────
 
-interface GooglePlacesResult {
+interface GooglePlacesNearbyResult {
   results: Array<{
     place_id: string;
     name: string;
@@ -155,7 +188,18 @@ interface GooglePlacesResult {
     geometry: { location: { lat: number; lng: number } };
     opening_hours?: { open_now?: boolean };
     types?: string[];
+    rating?: number;
+    user_ratings_total?: number;
+    price_level?: number;
   }>;
+  status: string;
+}
+
+interface GooglePlaceDetailsResult {
+  result?: {
+    opening_hours?: { weekday_text?: string[] };
+    current_opening_hours?: { weekday_text?: string[] };
+  };
   status: string;
 }
 
@@ -172,6 +216,20 @@ const CATEGORY_KEYWORDS: Record<ActivityCategory, string> = {
   celebration: 'spa OR rooftop restaurant OR lounge',
 };
 
+// Baseline vibe per category, same intent as the sample catalog's
+// per-template baseVibe, used as the starting point for the Google
+// Places heuristic before rating/review/price signals adjust it.
+const CATEGORY_BASE_VIBE: Record<ActivityCategory, Vibe> = {
+  calm_nature: 'quiet',
+  physical_release: 'lively',
+  social_gathering: 'lively',
+  quiet_reflection: 'quiet',
+  adventure: 'moderate',
+  creative_or_learning: 'moderate',
+  service_or_community: 'moderate',
+  celebration: 'lively',
+};
+
 function haversineKm(a: LocationContext, b: { lat: number; lng: number }): number {
   const R = 6371;
   const dLat = ((b.lat - a.latitude) * Math.PI) / 180;
@@ -183,13 +241,97 @@ function haversineKm(a: LocationContext, b: { lat: number; lng: number }): numbe
   return Math.round(R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)) * 10) / 10;
 }
 
+/**
+ * Estimates a vibe from free Places data: a category baseline, nudged by
+ * review volume (more reviews ~ more foot traffic historically) and price
+ * level (fine-dining-priced venues skew quieter), then adjusted for the
+ * current time of day the same way the sample catalog is. This is a
+ * heuristic standing in for real foot-traffic data, which Google's public
+ * API doesn't expose — see the file header comment.
+ */
+function estimateVibe(
+  category: ActivityCategory,
+  now: Date,
+  userRatingsTotal?: number,
+  priceLevel?: number,
+): Vibe {
+  let vibe = CATEGORY_BASE_VIBE[category];
+
+  if (userRatingsTotal !== undefined) {
+    if (userRatingsTotal > 1000 && vibe === 'moderate') vibe = 'lively';
+    if (userRatingsTotal < 50 && vibe === 'moderate') vibe = 'quiet';
+  }
+
+  if (priceLevel !== undefined && priceLevel >= 3 && vibe === 'lively') {
+    vibe = 'moderate'; // higher-end venues tend to run quieter than volume spots
+  }
+
+  return adjustVibeForTime(vibe, now.getHours(), now.getDay());
+}
+
 export function isPlacesProviderConfigured(): boolean {
   return Boolean(process.env['GOOGLE_PLACES_API_KEY']);
+}
+
+/**
+ * Extracts today's hours line from a Places API `weekday_text` array
+ * (["Monday: 9:00 AM – 5:00 PM", ...], Monday-first) for the given date.
+ */
+function todaysHoursFrom(weekdayText: string[] | undefined, now: Date): string | undefined {
+  if (!weekdayText || weekdayText.length !== 7) return undefined;
+  const jsDay = now.getDay(); // 0 = Sunday
+  const mondayFirstIndex = jsDay === 0 ? 6 : jsDay - 1;
+  const line = weekdayText[mondayFirstIndex];
+  if (!line) return undefined;
+  const colonIndex = line.indexOf(':');
+  return colonIndex === -1 ? line : line.slice(colonIndex + 1).trim();
+}
+
+/**
+ * Fetches weekly + holiday/special hours for one place. Best-effort: any
+ * failure just means the suggestion ships without typical_hours /
+ * special_hours_today rather than failing the whole request. Called once
+ * per Nearby Search result, in parallel — see fetchFromGooglePlaces.
+ */
+async function fetchPlaceHours(
+  placeId: string,
+  apiKey: string,
+  now: Date,
+): Promise<{ typicalHours?: string; specialHoursToday?: boolean }> {
+  try {
+    const params = new URLSearchParams({
+      place_id: placeId,
+      fields: 'opening_hours,current_opening_hours',
+      key: apiKey,
+    });
+
+    const response = await fetch(`${GOOGLE_PLACES_DETAILS_URL}?${params.toString()}`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) return {};
+
+    const data = (await response.json()) as GooglePlaceDetailsResult;
+    if (data.status !== 'OK') return {};
+
+    const regularToday = todaysHoursFrom(data.result?.opening_hours?.weekday_text, now);
+    const currentToday = todaysHoursFrom(data.result?.current_opening_hours?.weekday_text, now);
+
+    return {
+      typicalHours: currentToday ?? regularToday,
+      // current_opening_hours reflects any holiday/special-hours override the
+      // business has set; if it differs from the regular schedule, today's
+      // hours aren't the usual ones.
+      specialHoursToday: Boolean(regularToday && currentToday && regularToday !== currentToday),
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function fetchFromGooglePlaces(
   location: LocationContext,
   category: ActivityCategory,
+  now: Date,
 ): Promise<ActivitySuggestion[]> {
   const apiKey = process.env['GOOGLE_PLACES_API_KEY'];
   if (!apiKey) return [];
@@ -201,7 +343,7 @@ async function fetchFromGooglePlaces(
     key: apiKey,
   });
 
-  const response = await fetch(`${GOOGLE_PLACES_URL}?${params.toString()}`, {
+  const response = await fetch(`${GOOGLE_PLACES_NEARBY_URL}?${params.toString()}`, {
     signal: AbortSignal.timeout(8000),
   });
 
@@ -209,19 +351,34 @@ async function fetchFromGooglePlaces(
     throw new Error(`Google Places request failed: ${response.status}`);
   }
 
-  const data = (await response.json()) as GooglePlacesResult;
+  const data = (await response.json()) as GooglePlacesNearbyResult;
 
   if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
     throw new Error(`Google Places returned status ${data.status}`);
   }
 
-  return (data.results ?? []).slice(0, 5).map((place) => ({
+  const topResults = (data.results ?? []).slice(0, 5);
+
+  // Hours enrichment happens in parallel across all candidates in this
+  // category, not sequentially — one Details call per candidate, all fired
+  // at once, so latency is ~1 round trip regardless of how many results
+  // came back.
+  const hoursByPlace = await Promise.all(
+    topResults.map((place) => fetchPlaceHours(place.place_id, apiKey, now)),
+  );
+
+  return topResults.map((place, i) => ({
     id: place.place_id,
     name: place.name,
     category,
     description: place.vicinity ?? 'Nearby location',
     distance_km: haversineKm(location, place.geometry.location),
     is_open_now: place.opening_hours?.open_now,
+    typical_hours: hoursByPlace[i]?.typicalHours,
+    special_hours_today: hoursByPlace[i]?.specialHoursToday,
+    vibe: estimateVibe(category, now, place.user_ratings_total, place.price_level),
+    rating: place.rating,
+    review_count: place.user_ratings_total,
     relevance_score: 0, // scored by recommendation.service.ts
     source: 'google_places' as const,
   }));
@@ -234,32 +391,41 @@ async function fetchFromGooglePlaces(
  * Google Places first when GOOGLE_PLACES_API_KEY is configured; falls back
  * to the sample catalog on missing config or any error, per-category, so a
  * partial live-API failure still returns useful results.
+ *
+ * Categories are fetched concurrently (Promise.all), not one at a time —
+ * with N categories this is ~1 round trip's worth of latency instead of N.
+ *
+ * `vibe`, if given, is a *hard* filter: only quiet/moderate/lively matches
+ * are returned. If that filter would eliminate every candidate in a
+ * category, moderate-vibe results are included as a fallback so the list
+ * isn't empty — better one imperfect suggestion than none.
  */
 export async function getNearbyActivities(
   location: LocationContext,
   categories: ActivityCategory[],
   now: Date = new Date(),
+  vibe?: Vibe,
 ): Promise<ActivitySuggestion[]> {
-  const localHour = now.getHours();
+  const usePlaces = isPlacesProviderConfigured();
 
-  if (!isPlacesProviderConfigured()) {
-    return getSampleActivities(location, categories, localHour);
-  }
-
-  const results: ActivitySuggestion[] = [];
-  for (const category of categories) {
-    try {
-      const live = await fetchFromGooglePlaces(location, category);
-      if (live.length > 0) {
-        results.push(...live);
-        continue;
+  const perCategory = await Promise.all(
+    categories.map(async (category) => {
+      if (!usePlaces) return getSampleActivities(location, [category], now);
+      try {
+        const live = await fetchFromGooglePlaces(location, category, now);
+        if (live.length > 0) return live;
+        return getSampleActivities(location, [category], now);
+      } catch (err) {
+        console.warn(`[activityProvider] Google Places lookup failed for ${category}, using sample data:`, err);
+        return getSampleActivities(location, [category], now);
       }
-      results.push(...getSampleActivities(location, [category], localHour));
-    } catch (err) {
-      console.warn(`[activityProvider] Google Places lookup failed for ${category}, using sample data:`, err);
-      results.push(...getSampleActivities(location, [category], localHour));
-    }
-  }
+    }),
+  );
 
-  return results;
+  const results = perCategory.flat();
+  if (!vibe) return results;
+
+  const filtered = results.filter((r) => r.vibe === vibe);
+  if (filtered.length > 0) return filtered;
+  return results.filter((r) => r.vibe === 'moderate' || r.vibe === undefined);
 }

@@ -96,6 +96,18 @@ export async function buildApp() {
     });
   });
 
+  // ── Root ──────────────────────────────────────────────────────────────────
+  // Elastic Beanstalk's health checker (and most uptime monitors) hit `GET /`
+  // by default. Without this, that request 404s — the app itself is fine,
+  // but EB's health check reads repeated 404s as "unhealthy" and marks the
+  // environment Red even though every real route works. A trivial 200 here
+  // fixes that without needing to reconfigure EB's health check path.
+  app.get('/', async () => ({
+    name: 'nur-backend',
+    status: 'ok',
+    docs: '/health',
+  }));
+
   // ── Routes ────────────────────────────────────────────────────────────────
   await app.register(healthRoutes);
   await app.register(checkinRoutes);

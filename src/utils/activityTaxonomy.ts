@@ -16,20 +16,24 @@ import type { ActivityCategory, EmotionState } from '../types/index.js';
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Three categories per emotion (widened from two) for a broader spread of
+// suggestions — each list stays ordered by priority, so the scorer in
+// recommendation.service.ts still favours the first entries; the third
+// category just widens the candidate pool rather than diluting the ranking.
 export const ACTIVITY_TAXONOMY: Record<EmotionState, ActivityCategory[]> = {
-  anxiety: ['calm_nature', 'quiet_reflection'],
-  sadness: ['social_gathering', 'calm_nature'],
-  anger: ['physical_release', 'adventure'],
-  loneliness: ['social_gathering', 'service_or_community'],
-  gratitude: ['celebration', 'social_gathering'],
-  hope: ['adventure', 'creative_or_learning'],
-  guilt: ['service_or_community', 'quiet_reflection'],
-  confusion: ['quiet_reflection', 'calm_nature'],
-  peace: ['calm_nature', 'creative_or_learning'],
-  overwhelmed: ['calm_nature', 'quiet_reflection'],
-  grief: ['quiet_reflection', 'social_gathering'],
-  disconnection: ['social_gathering', 'service_or_community'],
-  joy: ['celebration', 'adventure'],
+  anxiety: ['calm_nature', 'quiet_reflection', 'creative_or_learning'],
+  sadness: ['social_gathering', 'calm_nature', 'quiet_reflection'],
+  anger: ['physical_release', 'adventure', 'calm_nature'],
+  loneliness: ['social_gathering', 'service_or_community', 'quiet_reflection'],
+  gratitude: ['celebration', 'social_gathering', 'service_or_community'],
+  hope: ['adventure', 'creative_or_learning', 'social_gathering'],
+  guilt: ['service_or_community', 'quiet_reflection', 'calm_nature'],
+  confusion: ['quiet_reflection', 'calm_nature', 'creative_or_learning'],
+  peace: ['calm_nature', 'creative_or_learning', 'quiet_reflection'],
+  overwhelmed: ['calm_nature', 'quiet_reflection', 'physical_release'],
+  grief: ['quiet_reflection', 'social_gathering', 'calm_nature'],
+  disconnection: ['social_gathering', 'service_or_community', 'adventure'],
+  joy: ['celebration', 'adventure', 'social_gathering'],
 };
 
 /**

@@ -88,7 +88,7 @@ describe('scoreActivity (pure scoring function)', () => {
 });
 
 describe('getActivityRecommendations', () => {
-  it('returns activities sorted by relevance score, capped at 6', async () => {
+  it('returns activities sorted by relevance score, capped at 8', async () => {
     vi.mocked(getNearbyActivities).mockResolvedValue([
       makeSuggestion({ id: '1', category: 'quiet_reflection', distance_km: 7, is_open_now: false }),
       makeSuggestion({ id: '2', category: 'calm_nature', distance_km: 0.5, is_open_now: true }),
@@ -99,7 +99,7 @@ describe('getActivityRecommendations', () => {
 
     const result = await getActivityRecommendations(makeProfile(), testLocation);
 
-    expect(result.length).toBeLessThanOrEqual(6);
+    expect(result.length).toBeLessThanOrEqual(8);
     // Scores should be in descending order
     for (let i = 1; i < result.length; i += 1) {
       expect(result[i - 1]!.relevance_score).toBeGreaterThanOrEqual(result[i]!.relevance_score);

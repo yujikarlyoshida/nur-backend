@@ -26,6 +26,23 @@
 // estimateVibe() below. It's a heuristic, not a measurement, and is
 // labelled as such in the UI.
 //
+// A note on halal filtering: every suggestion this service returns — sample
+// or live — is filtered to be halal-conscious by construction. Two layers,
+// applied unconditionally (this is not a togglable preference):
+//   1. Place `types` that are inherently non-halal (bar, night_club,
+//      liquor_store, casino) are hard-excluded before anything else runs.
+//   2. A name-keyword blocklist (isHalalExcluded()) catches venues Google's
+//      `types` taxonomy doesn't reliably flag — e.g. a "restaurant"-typed
+//      pork BBQ joint, a "lounge" that's really a bar. Food-adjacent
+//      category searches (social_gathering, celebration) also bias their
+//      keyword query toward "halal restaurant" so live results skew toward
+//      halal-friendly venues in the first place, not just away from
+//      excluded ones.
+// This is a best-effort filter, not a certification check — Google doesn't
+// expose halal-certification data, so nothing here can *guarantee* a venue
+// is halal-certified. See the README for this caveat and how to extend the
+// blocklist.
+//
 // Swapping in a different provider (Yelp Fusion, Foursquare, etc.) later
 // means adding a sibling to fetchFromGooglePlaces and branching in
 // getNearbyActivities — the rest of the app (recommendation.service.ts,
@@ -85,11 +102,17 @@ const SAMPLE_CATALOG: Record<ActivityCategory, ActivityTemplate[]> = {
     { name: 'Community center event board', description: 'Drop-in classes and meetups happening nearby this week.', hours: [9, 20], baseVibe: 'moderate' },
   ],
   celebration: [
-    { name: 'Rooftop dinner spot', description: 'Worth marking the moment somewhere with a view.', hours: [17, 23], baseVibe: 'lively' },
+    { name: 'Halal rooftop dinner spot', description: 'Worth marking the moment somewhere with a view — look for a halal-certified or halal-friendly menu.', hours: [17, 23], baseVibe: 'lively' },
     { name: 'Spa & wellness center', description: 'A deliberate, unhurried way to celebrate feeling good.', hours: [9, 20], baseVibe: 'quiet' },
     { name: 'K1 Speed (indoor go-karting)', description: 'A high-energy way to celebrate with people.', hours: [11, 23], baseVibe: 'lively' },
   ],
 };
+
+// All sample-catalog entries above are, by construction, alcohol-free,
+// non-nightlife venues (parks, mosques, studios, halal dining, etc.) — the
+// hand-written fallback needs no runtime filtering. Live Google Places
+// results do, since they're arbitrary real-world venues — see
+// isHalalExcluded() below.
 
 /**
  * Deterministically derives a plausible "nearby" distance (0.3km-8km) from
@@ -205,16 +228,69 @@ interface GooglePlaceDetailsResult {
 
 // Rough keyword per category — Google Places Nearby Search matches on
 // free-text `keyword` in addition to `type`, so this doesn't need to be exact.
+// Food-adjacent categories (social_gathering, celebration) bias the query
+// toward "halal" so live results skew halal-friendly from the start, on top
+// of the hard exclusion filtering applied to every result regardless of
+// category — see isHalalExcluded() and the file header note on halal
+// filtering.
 const CATEGORY_KEYWORDS: Record<ActivityCategory, string> = {
   calm_nature: 'park OR trail OR garden',
   physical_release: 'go kart OR climbing gym OR boxing gym',
-  social_gathering: 'bbq OR board game cafe OR community potluck',
+  social_gathering: 'halal restaurant OR bbq OR board game cafe OR community potluck',
   quiet_reflection: 'mosque OR library OR quiet cafe',
   adventure: 'hiking trail OR kayak rental OR trampoline park',
   creative_or_learning: 'pottery studio OR paint studio OR bookstore',
   service_or_community: 'volunteer OR community center',
-  celebration: 'spa OR rooftop restaurant OR lounge',
+  celebration: 'halal restaurant OR spa OR rooftop dining',
 };
+
+// Place `types` (Google's fixed taxonomy) that are always excluded, in every
+// category, regardless of emotion or vibe filter — these are never
+// halal-friendly venues by definition.
+const EXCLUDED_PLACE_TYPES = new Set(['bar', 'night_club', 'liquor_store', 'casino']);
+
+// Name-based fallback filter: Google's `types` field doesn't reliably flag
+// every non-halal venue (a "restaurant"-typed pork BBQ joint, a "lounge"
+// that's actually a bar), so this catches common non-halal signals in the
+// venue name as a second layer. Word-boundary matched, case-insensitive.
+// This is a best-effort heuristic, not a halal-certification check — Google
+// doesn't expose certification data. Extend this list if a category of
+// false negative shows up in practice.
+const EXCLUDED_NAME_PATTERNS: RegExp[] = [
+  /\bbars?\b/i,
+  /\bpub\b/i,
+  /\bnight ?club\b/i,
+  /\blounge\b/i,
+  /\bbrewery\b/i,
+  /\bbrewing\b/i,
+  /\bwinery\b/i,
+  /\bwine bar\b/i,
+  /\bcocktails?\b/i,
+  /\bliquors?\b/i,
+  /\bdistillery\b/i,
+  /\bcasino\b/i,
+  /\bstrip club\b/i,
+  /\bpork\b/i,
+  /\bbacon\b/i,
+  /\bham\b/i,
+  /\bpig roast\b/i,
+  /\bpulled pork\b/i,
+  /\bcharcuterie\b/i,
+  /\bgelatin\b/i,
+];
+
+/**
+ * True if a venue should be excluded from recommendations on halal grounds
+ * — either its Google `types` include a category that's never halal
+ * (bar/night_club/liquor_store/casino), or its name matches a known
+ * non-halal signal (alcohol venues, pork-centric food). Applied to every
+ * live Google Places result before it's ever scored or returned; there is
+ * no configuration to turn this off.
+ */
+export function isHalalExcluded(name: string, types: string[] | undefined): boolean {
+  if (types?.some((t) => EXCLUDED_PLACE_TYPES.has(t))) return true;
+  return EXCLUDED_NAME_PATTERNS.some((pattern) => pattern.test(name));
+}
 
 // Baseline vibe per category, same intent as the sample catalog's
 // per-template baseVibe, used as the starting point for the Google
@@ -338,7 +414,7 @@ async function fetchFromGooglePlaces(
 
   const params = new URLSearchParams({
     location: `${location.latitude},${location.longitude}`,
-    radius: '8000', // meters
+    radius: '12000', // meters — widened for a broader spread of suggestions
     keyword: CATEGORY_KEYWORDS[category],
     key: apiKey,
   });
@@ -357,7 +433,14 @@ async function fetchFromGooglePlaces(
     throw new Error(`Google Places returned status ${data.status}`);
   }
 
-  const topResults = (data.results ?? []).slice(0, 5);
+  // Halal filtering happens here, before anything downstream ever sees these
+  // results — excluded venues never get a Details call, never get scored,
+  // never render. Not a toggle; applied to every request.
+  const halalFriendly = (data.results ?? []).filter(
+    (place) => !isHalalExcluded(place.name, place.types),
+  );
+
+  const topResults = halalFriendly.slice(0, 8);
 
   // Hours enrichment happens in parallel across all candidates in this
   // category, not sequentially — one Details call per candidate, all fired

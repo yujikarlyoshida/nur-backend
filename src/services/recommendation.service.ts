@@ -353,8 +353,10 @@ export async function getActivityRecommendations(
     }))
     .sort((a, b) => b.relevance_score - a.relevance_score);
 
-  // Returns a slightly larger pool than before (6, not 4) so a client-side
-  // Quiet/Lively toggle (see the mobile app) has enough of both to work
-  // with without needing a second network round trip.
-  return scored.slice(0, 6);
+  // Returns a larger pool than before (8, not 4) — both to give a
+  // client-side Quiet/Lively toggle (see the mobile app) enough of both
+  // vibes to work with, and because the category taxonomy was widened from
+  // 2 to 3 categories per emotion (see activityTaxonomy.ts), so there's a
+  // broader, more varied candidate pool to draw the top results from.
+  return scored.slice(0, 8);
 }

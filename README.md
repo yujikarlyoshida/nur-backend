@@ -23,7 +23,7 @@ Frontend: [nur-mobile](https://github.com/yujikarlyoshida/nur-mobile)
 3. The input is classified into an emotional profile (primary emotion, intensity, spiritual need, life domain, themes) via Claude, with built-in crisis-signal detection.
 4. Candidate verses are gathered from two independent sources and blended: a hand-curated, reviewed taxonomy (`emotionTaxonomy.ts`, always available) and, when configured, semantic similarity search over verse embeddings (`semanticSearch.service.ts` — genuine RAG, not just an LLM call). The curated list is the deterministic safety net; semantic search augments relevance without ever fully replacing it — see the comments in `recommendation.service.ts` for why that split matters for a faith-context product.
 5. Each recommended verse gets a personalized note explaining why it fits.
-6. If the client sends `location` (`{ latitude, longitude }`), a second, independent recommendation track runs alongside verses: `activity_suggestions` — real-world things to do nearby, matched to the same emotional profile, the current time of day, and (if `vibe` is sent) a hard quiet/moderate/lively filter (`activityTaxonomy.ts` + `activityProvider.service.ts`). This is optional and additive; check-ins without a location behave exactly as they did before this existed.
+6. If the client sends `location` (`{ latitude, longitude }`), a second, independent recommendation track runs alongside verses: `activity_suggestions` — real-world things to do nearby, matched to the same emotional profile, the current time of day, and (if `vibe` is sent) a hard quiet/moderate/lively filter (`activityTaxonomy.ts` + `activityProvider.service.ts`). Every suggestion is halal-conscious by construction — see "Enabling real activity suggestions" below. This is optional and additive; check-ins without a location behave exactly as they did before this existed.
 7. Verses and activities run **concurrently**, not one after another — see "Architecture" below.
 8. The check-in and recommendations are persisted to Supabase on a best-effort basis (non-blocking — a DB failure never breaks the response).
 9. If a crisis signal is detected, the response includes `crisis_resources` with hotline info.
@@ -86,6 +86,15 @@ Send a `location` field with a check-in and the app returns `activity_suggestion
 That's it — no schema changes, no backfill job. Suggestions are scored the same way either way (category priority for the detected emotion, open-now status, distance); only the venue data source changes.
 
 With a key configured, each suggestion is also enriched with today's regular + holiday/special hours (a Place Details call per result, run concurrently) and a `vibe` (`quiet` / `moderate` / `lively`). On foot traffic specifically: Google doesn't expose real-time or predicted busyness through its public Places API (that's a paid third-party service like BestTime.app, not something this app integrates) — `vibe` is instead *estimated* for free from category, rating, review volume, price level, and time of day (`estimateVibe()` in `activityProvider.service.ts`). Send `vibe: "quiet" | "moderate" | "lively"` in the check-in request to hard-filter results server-side; the mobile app instead filters client-side over an already-returned pool so its Quiet/Lively toggle doesn't need a second request.
+
+Every activity suggestion — sample or live — is halal-conscious by construction, unconditionally (this is not a per-user preference to toggle). Two layers, applied in `activityProvider.service.ts` before a candidate is ever scored or returned:
+
+1. Google place `types` that are never halal (`bar`, `night_club`, `liquor_store`, `casino`) are hard-excluded outright.
+2. A name-keyword blocklist (`isHalalExcluded()`) catches what `types` misses — a `restaurant`-typed pork BBQ joint, a `lounge` that's really a bar, alcohol venues (pub, brewery, winery, distillery), and pork/gelatin-centric food (pork, bacon, ham, charcuterie, gelatin). Food-adjacent category searches (`social_gathering`, `celebration`) also bias their keyword query toward `"halal restaurant"` so live results skew halal-friendly to begin with, not just away from excluded venues.
+
+This is a best-effort filter, not a halal-certification check — Google's public API doesn't expose certification data, so nothing here can *guarantee* a venue is certified halal. See `tests/halalFilter.test.ts` for the exact cases covered, and extend `EXCLUDED_NAME_PATTERNS` in `activityProvider.service.ts` if a gap shows up in practice.
+
+The activity taxonomy (`activityTaxonomy.ts`) also maps each emotion to 3 categories now instead of 2, and the Places search radius/result count were widened (12km, up to 8 candidates per category before scoring) — a broader, more varied pool for the same amount of location data.
 
 ### Seeding 50 demo users
 

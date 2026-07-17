@@ -13,7 +13,7 @@ Frontend: [nur-mobile](https://github.com/yujikarlyoshida/nur-mobile)
 - **Quran.com API v4** for verse text and translations
 - **Google Places API** for real-world activity suggestions, plus optionally the **Distance Matrix API** for real-time traffic-aware travel time (optional, see below — a sample catalog is used otherwise)
 - **Supabase** (Postgres) for check-in persistence and vector search
-- `@fastify/helmet`, `@fastify/cors`, `@fastify/sensible` for security and error handling
+- `@fastify/helmet`, `@fastify/cors`, `@fastify/sensible`, `@fastify/rate-limit` for security, CORS, error handling, and abuse protection
 - **Vitest** for unit tests, **GitHub Actions** for CI, **Docker** for deployment
 
 ## How it works
@@ -52,6 +52,10 @@ To add a third recommendation type (dhikr reminders, community events, whatever'
 | `GET` | `/api/verses/*` | Verse lookup helpers |
 | `GET` | `/api/recommendations/*` | Recommendation helpers |
 | `GET` | `/health` | Health check |
+
+### Rate limiting
+
+Every route gets a default ceiling of 60 requests/minute per IP (`plugins/rateLimit.ts`). `POST /api/checkin` has a stricter override of 15 requests/minute — it's the one route that calls Claude (and, with a location, Google Places/Distance Matrix), all billed per-request, so this exists specifically to keep a script from running the API bill up rather than to police normal usage. `/` and `/health` are exempt (the EB health checker polls `/` every 10-15s). Exceeding the limit returns `429` with a `message` telling the client how many seconds until it can retry.
 
 ## Getting started
 

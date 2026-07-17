@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 // ─── Plugins ──────────────────────────────────────────────────────────────────
 import corsPlugin from './plugins/cors.js';
 import sensiblePlugin from './plugins/sensible.js';
+import rateLimitPlugin from './plugins/rateLimit.js';
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 import { healthRoutes } from './routes/health.js';
@@ -59,6 +60,12 @@ export async function buildApp() {
 
   // ── CORS ──────────────────────────────────────────────────────────────────
   await app.register(corsPlugin);
+
+  // ── Rate limiting ─────────────────────────────────────────────────────────
+  // Registered early so it can reject abusive requests before they reach any
+  // route handler — in particular before checkin.ts's Claude API call, which
+  // costs real money per request. See plugins/rateLimit.ts.
+  await app.register(rateLimitPlugin);
 
   // ── Sensible error helpers ────────────────────────────────────────────────
   await app.register(sensiblePlugin);

@@ -73,6 +73,17 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
           },
         },
       },
+      // Stricter than the app-wide default (see plugins/rateLimit.ts) — this
+      // route calls Claude (and, when a location is sent, Google Places /
+      // Distance Matrix), all billed per-request. A real user check-in flow
+      // rarely needs more than a handful of these a minute; this just keeps a
+      // script from running the meter up.
+      config: {
+        rateLimit: {
+          max: 15,
+          timeWindow: '1 minute',
+        },
+      },
     },
     async (request: FastifyRequest, reply: FastifyReply) => {
       // ── 1. Validate request body ─────────────────────────────────────────
